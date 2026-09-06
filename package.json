@@ -1,0 +1,30 @@
+{
+  "name": "pi-web-toolkit",
+  "version": "0.1.0",
+  "description": "Web toolkit for pi: Context7 library docs, Exa web search/fetch, and Sourcegraph code search in a single extension.",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "author": "whosydd",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whosydd/pi-web-toolkit.git"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "typescript": "^7.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1"
+  }
+}
