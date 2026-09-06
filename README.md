@@ -1,6 +1,6 @@
 # pi-web-toolkit
 
-A single [pi](https://pi.dev) extension that bundles three web tools:
+A [pi](https://pi.dev) package with three independent extensions (toggle each one via `pi config`):
 
 - **Context7** — `ctx7_library` / `ctx7_docs`: search and fetch up-to-date official library documentation (runs via `npx ctx7`, no install required)
 - **Exa** — `exa_search` / `exa_fetch`: high-quality web search with category/date/domain filters, plus full-text page fetching
