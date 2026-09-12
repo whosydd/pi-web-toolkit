@@ -1,7 +1,7 @@
 {
   "name": "pi-web-toolkit",
   "version": "0.1.0",
-  "description": "Web toolkit for pi: Context7 library docs, Exa web search/fetch, and Sourcegraph code search in a single extension.",
+  "description": "Web toolkit for pi: Exa web search/fetch and Sourcegraph code search in a single package.",
   "keywords": [
     "pi-package"
   ],
@@ -17,14 +17,16 @@
       "./extensions"
     ]
   },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
-  "dependencies": {
-    "typescript": "^7.0.2"
-  },
   "devDependencies": {
-    "@types/node": "^26.4.1"
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
   }
 }
