@@ -403,6 +403,11 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Fetch page content by URL: full text (default, capped via text.maxCharacters), highlights, summary, links, and/or code blocks. Supports freshness control and subpage crawling.",
 		promptSnippet: "Fetch webpage content by URL using Exa",
+		promptGuidelines: [
+			"Use exa_fetch once you have the URL of the page that owns the answer; exa_search only returns highlights, not the full page.",
+			"Keep pages small: pass text.maxCharacters (default 10000) or pick highlights/summary instead of full text.",
+			"exa_fetch answers HTTP 200 even when individual URLs fail, so check the reported per-URL failures before concluding a page has no content.",
+		],
 		parameters: Type.Object({
 			urls: Type.Array(Type.String(), { description: `URLs to fetch (max ${MAX_URLS})` }),
 			text: Type.Optional(TextParam),

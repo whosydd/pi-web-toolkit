@@ -25,7 +25,7 @@ pi -e git:github.com/whosydd/pi-web-toolkit
 | `SRC_ENDPOINT` | no | `code_search` queries `https://sourcegraph.com` |
 | `SRC_ACCESS_TOKEN` | no | `code_search` queries the public index anonymously (rate limited, no private repos) |
 
-Get an Exa API key at [exa.ai](https://exa.ai). pi-web-toolkit notifies you at session start which tools are active.
+Get an Exa API key at [exa.ai](https://exa.ai). If `EXA_API_KEY` is missing, pi warns once at session start that the exa tools are disabled; `code_search` is always registered.
 
 Need Context7 library docs? Use the official extension instead — `pi install npm:@upstash/context7-pi`.
 
