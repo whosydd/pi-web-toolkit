@@ -189,7 +189,7 @@ export function checkFilterValue(value: string): string | null {
 
 export function buildQuery(
 	params: { query: string; lang?: string; repo?: string; count?: number },
-): { ok: true; query: string; notes: string[] } | { ok: false; error: string } {
+): { ok: true; query: string; notes: string[]; count: number } | { ok: false; error: string } {
 	const notes: string[] = [];
 	const parts: string[] = [];
 	const base = stripCount(params.query ?? "", notes);
@@ -208,7 +208,7 @@ export function buildQuery(
 	const { count, note } = normalizeCount(params.count);
 	if (note) notes.push(note);
 	parts.push(`count:${count}`);
-	return { ok: true, query: parts.join(" "), notes };
+	return { ok: true, query: parts.join(" "), notes, count };
 }
 
 const SKIP_NOTES: Record<string, string> = {
@@ -220,10 +220,35 @@ const SKIP_NOTES: Record<string, string> = {
 	"repository-fork": "forked repositories are excluded by default; add `fork:yes` to include them",
 };
 
-export function formatWarnings(results: SgResults, notes: string[]): string[] {
+/**
+ * Reasons that only mean "the search stopped", not "the index truncated".
+ * Sourcegraph emits `shard-match-limit` on every query that fills the requested
+ * `count:`, so reporting it as truncation flags each successful search — the
+ * caller already asked for exactly that many matches.
+ */
+const COUNT_BOUND_REASONS = new Set(["shard-match-limit"]);
+
+/**
+ * Reasons that only matter when they could explain a miss. With matches in hand
+ * the archived/forked hints repeat on every query and drown out the real notes;
+ * on an empty result they are exactly what keeps the model from concluding that
+ * the code does not exist.
+ */
+const EXCLUSION_REASONS = new Set(["excluded-archive", "excluded-fork", "repository-fork"]);
+
+export interface WarningOptions {
+	/** The `count:` the tool asked for — separates "stopped at count" from "really truncated". */
+	count?: number;
+}
+
+export function formatWarnings(results: SgResults, notes: string[], options: WarningOptions = {}): string[] {
 	const warnings = [...notes];
+	const countSatisfied = options.count != null && (results.matchCount ?? 0) >= options.count;
+	const hasMatches = results.matches.length > 0;
 	// Reasons repeat across progress events; list each one once.
 	for (const reason of results.skipped.keys()) {
+		if (countSatisfied && COUNT_BOUND_REASONS.has(reason)) continue;
+		if (hasMatches && EXCLUSION_REASONS.has(reason)) continue;
 		warnings.push(SKIP_NOTES[reason] ?? `Sourcegraph skipped some results (${reason})`);
 	}
 	if (results.parseErrors > 0) {
@@ -272,7 +297,7 @@ export function formatMatch(item: SgMatch, index: number): string {
 	}
 }
 
-export function renderResults(results: SgResults, notes: string[]): string {
+export function renderResults(results: SgResults, notes: string[], options: WarningOptions = {}): string {
 	const shown = results.matches.slice(0, MAX_SHOWN);
 	// `count:` bounds matches, and one file match can carry several matched lines.
 	const fileItems = results.matches.filter((m) => m.type === "content" || m.type === "path" || m.type === "symbol");
@@ -296,7 +321,7 @@ export function renderResults(results: SgResults, notes: string[]): string {
 	if (typeof results.matchCount === "number" && results.matchCount > occurrences) {
 		sections.push(`ℹ️ Sourcegraph reports ${results.matchCount} matches in total; returned ${occurrences}.`);
 	}
-	const warnings = formatWarnings(results, notes);
+	const warnings = formatWarnings(results, notes, options);
 	if (warnings.length > 0) sections.push(["⚠️ Note:", ...warnings.map((w) => `- ${w}`)].join("\n"));
 	return sections.join("\n\n");
 }
@@ -350,11 +375,12 @@ type SearchOutcome =
 	| { kind: "ok"; text: string; truncated: boolean }
 	| { kind: "http"; status: number; detail: string }
 	| { kind: "aborted" }
-	| { kind: "error"; message: string };
+	| { kind: "error"; message: string; timedOut: boolean };
 
 /** Fetch with a per-attempt timeout (covering the body read) and retries. */
 async function fetchSearch(url: string, headers: Record<string, string>, outer?: AbortSignal): Promise<SearchOutcome> {
 	let lastError = "unknown error";
+	let lastTimedOut = false;
 	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
 		if (attempt > 0) await sleep(500 * 2 ** (attempt - 1));
 		const controller = new AbortController();
@@ -374,6 +400,7 @@ async function fetchSearch(url: string, headers: Record<string, string>, outer?:
 					.catch(() => "");
 				if (RETRYABLE_STATUS.has(res.status) && attempt < MAX_RETRIES) {
 					lastError = `HTTP ${res.status}`;
+					lastTimedOut = false;
 					continue;
 				}
 				return { kind: "http", status: res.status, detail };
@@ -382,12 +409,13 @@ async function fetchSearch(url: string, headers: Record<string, string>, outer?:
 		} catch (err) {
 			if (outer?.aborted) return { kind: "aborted" };
 			lastError = timedOut ? `request timed out (${REQUEST_TIMEOUT_MS / 1000}s)` : ((err as Error)?.message ?? String(err));
+			lastTimedOut = timedOut;
 		} finally {
 			clearTimeout(timer);
 			outer?.removeEventListener("abort", forwardAbort);
 		}
 	}
-	return { kind: "error", message: lastError };
+	return { kind: "error", message: lastError, timedOut: lastTimedOut };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -424,7 +452,13 @@ export default function (pi: ExtensionAPI) {
 			if (outcome.kind === "aborted") return fail("code_search was cancelled.");
 			if (outcome.kind === "http") return fail(httpError(outcome.status, outcome.detail, endpoint));
 			if (outcome.kind === "error") {
-				return fail(`Sourcegraph request failed: ${outcome.message}${token ? "" : " (set SRC_ACCESS_TOKEN to raise the rate limit)"}`);
+				// A DNS/TLS/proxy failure is not something a token fixes, so only mention
+				// rate limiting when the request actually timed out on the public index.
+				const hint =
+					!token && outcome.timedOut
+						? " The public index rate-limits anonymous traffic; retry later or set SRC_ACCESS_TOKEN."
+						: "";
+				return fail(`Sourcegraph request failed: ${outcome.message}${hint}`);
 			}
 
 			const results = collectResults(outcome.text);
@@ -435,10 +469,10 @@ export default function (pi: ExtensionAPI) {
 				// Surface the real reason (bad query, no such repo, ...) instead of
 				// pretending the code does not exist.
 				if (results.alerts.length > 0) return fail(formatAlerts(results.alerts));
-				const warnings = formatWarnings(results, built.notes);
+				const warnings = formatWarnings(results, built.notes, { count: built.count });
 				return ok(warnings.length > 0 ? `No results found.\n\n⚠️ Note:\n${warnings.map((w) => `- ${w}`).join("\n")}` : "No results found.");
 			}
-			return ok(renderResults(results, built.notes));
+			return ok(renderResults(results, built.notes, { count: built.count }));
 		},
 	});
 }

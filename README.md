@@ -41,7 +41,10 @@ Need Context7 library docs? Use the official extension instead — `pi install n
 
 - **Queries use Sourcegraph syntax.** `patternType:regexp` for regex, plus `lang:`, `repo:`, `file:`, `type:` filters. `count:` is managed by the tool (default 5, max 20) — a top-level `count:` is replaced; quote it if you need a literal `count:` inside a pattern.
 - **Match types are rendered, not filtered.** `type:path` / `type:commit` / `type:repo` / `type:symbol` results are shown as such instead of being reported as "no results".
-- **Errors and truncation are surfaced.** Sourcegraph answers HTTP 200 even for a broken query, and silently excludes archived/forked repositories by default; both are reported back to the model instead of being mistaken for "this code does not exist".
+- **Errors and truncation are surfaced.** Sourcegraph answers HTTP 200 even for a broken query, so query alerts, unparseable stream events and real truncation are reported instead of being mistaken for "this code does not exist".
+- **Warnings are filtered to what is actionable.** A `shard-match-limit` skip is not reported as truncation when the search simply filled the requested `count:` (that is the expected stop condition), and the "archived/forked repos are excluded" hints are only shown when a query returns no matches — where they are what stops the model from concluding the code does not exist.
+- **Rate limiting and network failures are told apart.** Only a real 429 or a timeout mentions `SRC_ACCESS_TOKEN`; a DNS/TLS/proxy failure is reported as-is.
+- **At most 10 files are rendered** (only for `count:` up to 20) — the header states how many were shown and whether Sourcegraph reported more matches in total.
 - **Content line numbers are shown 1-based** (the API reports them 0-based).
 - **Nothing is sent anywhere except to Sourcegraph.** The endpoint defaults to the public anonymous index; set `SRC_ENDPOINT` / `SRC_ACCESS_TOKEN` (same variables as [`src-cli`](https://github.com/sourcegraph/src-cli)) to search a self-hosted instance. Keep in mind that query text leaves your machine.
 - The public index is a free, best-effort endpoint: requests are retried twice and capped at 15s, but heavy use may be rate limited.

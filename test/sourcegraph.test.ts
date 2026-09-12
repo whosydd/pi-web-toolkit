@@ -174,14 +174,31 @@ describe("formatMatch", () => {
 });
 
 describe("renderResults", () => {
-	it("reports truncation, skipped reasons and totals", () => {
-		const results = collectResults(bodyOf(contentFrame(0, "a"), progressBody({ matchCount: 99 })));
-		const text = renderResults(results, []);
+	it("does not call a search truncated when it filled the requested count", () => {
+		const results = collectResults(bodyOf(contentFrame(0, "a"), progressBody({ matchCount: 5 })));
+		const text = renderResults(results, [], { count: 5 });
 		assert.match(text, /Found 1 match in 1 file across 1 repository/);
-		assert.match(text, /reports 99 matches in total; returned 1/);
-		assert.match(text, /truncated/);
+		assert.doesNotMatch(text, /shard match limit/);
+	});
+
+	it("still reports truncation when fewer matches arrived than count", () => {
+		const results = collectResults(bodyOf(contentFrame(0, "a"), progressBody({ matchCount: 2 })));
+		const text = renderResults(results, [], { count: 20 });
+		assert.match(text, /shard match limit reached; results were truncated/);
+		assert.match(text, /reports 2 matches in total; returned 1/);
+	});
+
+	it("surfaces fork/archive exclusions only when they could explain a miss", () => {
+		const withMatches = collectResults(bodyOf(contentFrame(0, "a"), progressBody({ matchCount: 1 })));
+		const noisy = renderResults(withMatches, [], { count: 1 });
+		assert.doesNotMatch(noisy, /archived repositories/);
+		assert.doesNotMatch(noisy, /forked repositories/);
+		assert.doesNotMatch(noisy, /⚠️ Note:/);
+
+		const empty = collectResults(bodyOf(progressBody({ matchCount: 0, skipped: [{ reason: "excluded-fork" }, { reason: "excluded-archive" }] })));
+		const text = renderResults(empty, [], { count: 5 });
 		assert.match(text, /archived repositories are excluded by default/);
-		assert.doesNotMatch(text, /×2/);
+		assert.match(text, /forked repositories are excluded by default/);
 	});
 
 	it("states how many of the matches are shown", () => {
@@ -238,6 +255,18 @@ describe("code_search execute", () => {
 		const result = await loadTool().execute("id", { query: "func" });
 		assert.equal(result.isError, undefined);
 		assert.equal(urls.length, 2);
+	});
+
+	it("does not blame rate limits for a network failure", async () => {
+		stubFetch([
+			() => {
+				throw new TypeError("fetch failed");
+			},
+		]);
+		const result = await loadTool().execute("id", { query: "func" });
+		assert.equal(result.isError, true);
+		assert.match(result.content[0].text, /fetch failed/);
+		assert.doesNotMatch(result.content[0].text, /SRC_ACCESS_TOKEN/);
 	});
 
 	it("retries a 429 and reports rate limiting when it persists", async () => {
