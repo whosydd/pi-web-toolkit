@@ -1,7 +1,7 @@
 {
   "name": "pi-web-toolkit",
   "version": "0.1.0",
-  "description": "Web toolkit for pi: Exa web search/fetch and Sourcegraph code search in a single package.",
+  "description": "Web toolkit for pi: Context7 library docs, Exa web search/fetch and Sourcegraph code search, plus a routing skill.",
   "keywords": [
     "pi-package"
   ],
@@ -15,6 +15,9 @@
   "pi": {
     "extensions": [
       "./extensions"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {

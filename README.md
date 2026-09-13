@@ -1,9 +1,12 @@
 # pi-web-toolkit
 
-A [pi](https://pi.dev) package with two independent extensions (toggle each one via `pi config`):
+A [pi](https://pi.dev) package with three independent extensions (toggle each one via `pi config`) plus a `web-search` routing skill:
 
+- **Context7** — `ctx7_library` / `ctx7_docs`: up-to-date, version-aware library and framework documentation from [Context7](https://context7.com)
 - **Exa** — `exa_search` / `exa_fetch`: high-quality web search with category/date/domain filters, selectable content extraction (highlights/text/summary/links/code blocks), freshness control, subpage crawling, and optional structured synthesis
 - **Sourcegraph** — `code_search`: search code across millions of public open-source repositories (free, no API key)
+
+The bundled `web-search` skill teaches the agent which source to use for a given question and how to chain the tools.
 
 ## Install
 
@@ -21,21 +24,33 @@ pi -e git:github.com/whosydd/pi-web-toolkit
 
 | Variable           | Required | Effect when missing                                    |
 | ------------------ | -------- | ------------------------------------------------------ |
+| `CONTEXT7_API_KEY` | no | `ctx7_*` fall back to Context7's IP-based free-tier rate limits |
 | `EXA_API_KEY` | no | `exa_search` / `exa_fetch` are not registered |
 | `SRC_ENDPOINT` | no | `code_search` queries `https://sourcegraph.com` |
 | `SRC_ACCESS_TOKEN` | no | `code_search` queries the public index anonymously (rate limited, no private repos) |
 
-Get an Exa API key at [exa.ai](https://exa.ai). If `EXA_API_KEY` is missing, pi warns once at session start that the exa tools are disabled; `code_search` is always registered.
-
-Need Context7 library docs? Use the official extension instead — `pi install npm:@upstash/context7-pi`.
+Get an Exa API key at [exa.ai](https://exa.ai) and a Context7 key at [context7.com/dashboard](https://context7.com/dashboard). If `EXA_API_KEY` is missing, pi warns once at session start that the exa tools are disabled. `ctx7_*` and `code_search` are always registered — Context7 works keyless at IP-based free-tier limits.
 
 ## Tools
 
 | Tool           | Description                                                        |
 | -------------- | ------------------------------------------------------------------ |
+| `ctx7_library` | Resolve a package/product name to a Context7 library ID (`/org/project`, optionally `/version`) |
+| `ctx7_docs`    | Fetch documentation and code examples for a resolved Context7 library ID |
 | `exa_search`   | Web search with filters, content modes, freshness, code/link extraction, structured output |
 | `exa_fetch`    | Fetch page text/highlights/summary by URL with freshness and subpages |
 | `code_search`  | Code search across public open-source repos via the Sourcegraph streaming API |
+
+## Routing skill
+
+`skills/web-search` ships with the package and is loaded on demand. It maps a question to the right source — library docs → Context7, web/current facts → Exa, real-world usage → Sourcegraph — and describes each tool's workflow and limits.
+
+## `ctx7_*` notes
+
+- **Resolve first.** `ctx7_library` takes `libraryName` (official spelling, e.g. `Next.js`) and `query`; `ctx7_docs` takes the returned `libraryId` and a single-concept `query`. Skip resolution when the user already provides a `/org/project` (optionally `/version`) ID.
+- **Version-aware.** Append a version to the ID (`/vercel/next.js/v14.3.0-canary.87`) to pin docs to it.
+- **Errors are surfaced as tool errors.** A 429 explains the free-tier/key distinction, 401 points at the `ctx7sk` key format, 404 means the ID does not exist, and an empty body says the docs are not finalized.
+- **The query is sent to Context7.** Keep secrets, credentials and proprietary code out of it.
 
 ## `code_search` notes
 
