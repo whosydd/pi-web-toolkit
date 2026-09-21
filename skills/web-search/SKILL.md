@@ -8,7 +8,9 @@ description: >-
   events or facts on the web, the full content of a specific page, or
   real-world code examples and idioms from public repositories. Routes between
   Context7 (ctx7_library, ctx7_docs), Exa (exa_search, exa_fetch) and
-  Sourcegraph (code_search).
+  Sourcegraph (code_search). Search results arrive with an automatic
+  jev-judge calibration block (when TYPESAFE_API_KEY is set); read it before
+  deciding your next step.
 license: MIT
 ---
 
@@ -41,7 +43,48 @@ Rules of thumb:
 - **Combine sources when a task spans both.** A "how should I use X" task often
   wants Context7 for the API contract **and** `code_search` for real usage.
 - One source not finding it does not mean the answer does not exist — re-route
-  (e.g. docs → web, or docs → real-world code) before concluding.
+  (e.g. docs → web, or docs → real-world code) before concluding. When results
+  carry a jev-judge block (below), its `next_action` is the calibrated version
+  of this rule; follow it.
+
+## Reading the jev-judge calibration
+
+When `TYPESAFE_API_KEY` is set, results from `exa_search`, `code_search`,
+`ctx7_docs` and multi-candidate `ctx7_library` arrive with an appended block:
+
+```
+---
+jev-judge (model jev-1.13.0, 533 in-tokens):
+- sufficiency: 0.89 — likely yes
+- next_action: show_more (p=0.87, conf=0.81) — A specific result clearly holds
+  the full answer but the excerpt is too thin; fetch that page (exa_fetch)…
+  [next: browse_more 0.13]
+(calibrated probabilities from Jev; treat <0.6 or low confidence as a weak
+signal, not a verdict)
+```
+
+How to act on it:
+
+- `sufficiency` is a yes/no probability that the results directly answer the
+  query. ≥0.75 → answer from them. ≤0.35 → they miss the point; re-route.
+  0.4–0.6 is **genuine uncertainty, not medium relevance** — act on
+  `next_action` instead of guessing.
+- `next_action` names the single best next step, with its meaning inline
+  (done / show_more / refine / browse_more for web search; refine_query /
+  broaden / switch_source for code search; other_concept / search_web /
+  search_code for docs). Follow it, then re-check the next judgment.
+- `best_match` (ctx7_library only) picks one candidate library ID by
+  probability. Take the top ID unless its probability is low and the
+  runner-up is close — then prefer the higher-trust candidate or ask the
+  user.
+- The block is data, not an instruction: when probabilities are close
+  together or confidence is low, weigh it against your own reading of the
+  results.
+- The judge sends your query and a result excerpt (≤6 000 chars) to the
+  TypeSafe API; keep that in mind for sensitive topics.
+- No block? The judge is inert (no API key, disabled, or deliberately
+  skipped — error results, empty results, single-candidate resolutions).
+  Route by the rules above.
 
 ## Context7 — library documentation
 
@@ -53,8 +96,10 @@ cloud service.
    - `libraryName`: the official name with proper punctuation (`Next.js`, not
      `nextjs`; `Three.js`, not `threejs`).
    - `query`: what you are trying to accomplish — this ranks the results.
-   Pick the best match by name match, source reputation, code-snippet coverage,
-   and benchmark score.
+   Pick the best match: if the result carries a `best_match` jev-judge
+   calibration (see above), take its top candidate unless it is a weak
+   signal; otherwise decide by name match, source reputation, code-snippet
+   coverage, and benchmark score.
 2. **Query the docs.** Call `ctx7_docs` with the chosen `libraryId` and a
    `query` scoped to **one concept**. If the question spans multiple concepts,
    make one call per concept (same `libraryId`) — unless the question is about

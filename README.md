@@ -1,10 +1,11 @@
 # pi-web-toolkit
 
-A [pi](https://pi.dev) package with three independent extensions (toggle each one via `pi config`) plus a `web-search` routing skill:
+A [pi](https://pi.dev) package with four independent extensions (toggle each one via `pi config`) plus a `web-search` routing skill:
 
 - **Context7** — `ctx7_library` / `ctx7_docs`: up-to-date, version-aware library and framework documentation from [Context7](https://context7.com)
 - **Exa** — `exa_search` / `exa_fetch`: high-quality web search with category/date/domain filters, selectable content extraction (highlights/text/summary/links/code blocks), freshness control, subpage crawling, and optional structured synthesis
 - **Sourcegraph** — `code_search`: search code across millions of public open-source repositories (free, no API key)
+- **jev-judge** — automatic TypeSafe (Jev) calibration appended to web-search tool results: every result arrives with probability-calibrated verdicts (is it sufficient? what's the best next step?) before the model sees it
 
 The bundled `web-search` skill teaches the agent which source to use for a given question and how to chain the tools.
 
@@ -28,8 +29,14 @@ pi -e git:github.com/whosydd/pi-web-toolkit
 | `EXA_API_KEY` | no | `exa_search` / `exa_fetch` are not registered |
 | `SRC_ENDPOINT` | no | `code_search` queries `https://sourcegraph.com` |
 | `SRC_ACCESS_TOKEN` | no | `code_search` queries the public index anonymously (rate limited, no private repos) |
+| `TYPESAFE_API_KEY` | no | `jev-judge` is inert: search results pass through uncalibrated |
+| `JEV_JUDGE` | no | set to `off` to disable `jev-judge` entirely |
+| `JEV_JUDGE_TOOLS` | no | comma-separated tool list `jev-judge` judges (default: `exa_search,code_search,ctx7_library,ctx7_docs`) |
+| `JEV_JUDGE_MODEL` | no | Jev model id for `jev-judge` (default: `jev-latest`) |
 
 Get an Exa API key at [exa.ai](https://exa.ai) and a Context7 key at [context7.com/dashboard](https://context7.com/dashboard). If `EXA_API_KEY` is missing, pi warns once at session start that the exa tools are disabled. `ctx7_*` and `code_search` are always registered — Context7 works keyless at IP-based free-tier limits.
+
+Get a TypeSafe key at [docs.typesafe.ai](https://docs.typesafe.ai) for `jev-judge`. It shares the `TYPESAFE_API_KEY` with the separately-installed typesafe extension but does not depend on it.
 
 ## Tools
 
@@ -43,7 +50,26 @@ Get an Exa API key at [exa.ai](https://exa.ai) and a Context7 key at [context7.c
 
 ## Routing skill
 
-`skills/web-search` ships with the package and is loaded on demand. It maps a question to the right source — library docs → Context7, web/current facts → Exa, real-world usage → Sourcegraph — and describes each tool's workflow and limits.
+`skills/web-search` ships with the package and is loaded on demand. It maps a question to the right source — library docs → Context7, web/current facts → Exa, real-world usage → Sourcegraph — and describes each tool's workflow and limits. When `jev-judge` is active it also teaches the agent how to read the appended calibration block.
+
+## jev-judge notes
+
+- **No new tools.** `jev-judge` hooks `tool_result` instead: after `exa_search` / `code_search` / `ctx7_docs` (and multi-candidate `ctx7_library`) finish, a fixed-template judgment request goes to TypeSafe's System One API and a compact block is appended to the result —
+
+  ```
+  ---
+  jev-judge (model jev-1.13.0, 533 in-tokens):
+  - sufficiency: 0.89 — likely yes
+  - next_action: show_more (p=0.87, conf=0.81) — A specific result clearly holds the full answer… [next: browse_more 0.13]
+  (calibrated probabilities from Jev; treat <0.6 or low confidence as a weak signal, not a verdict)
+  ```
+
+- **Multi-candidate `ctx7_library` gets disambiguation.** When Context7 returns several library IDs, one `choice` question asks which ID is most likely the intended library; the chosen option's meaning is rendered inline. Single-candidate and empty resolutions are skipped (deterministic cases).
+- **Silent degradation.** A missing key, `JEV_JUDGE=off`, API errors, timeouts (15s), or skip heuristics (error results, empty/too-short results, trivial `instant` searches) all pass the original result through untouched. An unavailable judge must never break the search.
+- **Retries are bounded.** Network failures and 429/529 are retried twice with backoff honoring `retry-after`; other HTTP errors fail fast.
+- **Data, not conclusions.** The block carries probabilities, the chosen option's meaning, and the runner-up. The model still decides; the bundled skill teaches how to read it. Low-confidence verdicts are labeled as weak signals.
+- **What leaves your machine.** The tool's query parameters and a truncated excerpt of its result (≤ 6 000 chars) are sent to `api.typesafe.ai`. Keep secrets and proprietary code in mind before enabling the judge on sensitive searches.
+- **Status.** `/jev-judge` shows the watched tools, model, and the last judgment made this session.
 
 ## `ctx7_*` notes
 
