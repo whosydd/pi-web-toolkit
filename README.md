@@ -5,7 +5,7 @@ A [pi](https://pi.dev) package with four independent extensions (toggle each one
 - **Context7** — `ctx7_library` / `ctx7_docs`: up-to-date, version-aware library and framework documentation from [Context7](https://context7.com)
 - **Exa** — `exa_search` / `exa_fetch`: high-quality web search with category/date/domain filters, selectable content extraction (highlights/text/summary/links/code blocks), freshness control, subpage crawling, and optional structured synthesis
 - **Sourcegraph** — `code_search`: search code across millions of public open-source repositories (free, no API key)
-- **jev-judge** — automatic TypeSafe (Jev) calibration appended to web-search tool results: every result arrives with probability-calibrated verdicts (is it sufficient? what's the best next step?) before the model sees it
+- **jev-judge** — automatic TypeSafe (Jev) calibration appended to web-search tool results: every result arrives with probability-calibrated verdicts (is it sufficient? what's the best next step?) before the model sees it; persistent account failures (empty balance, bad key) raise throttled user warnings
 
 The bundled `web-search` skill teaches the agent which source to use for a given question and how to chain the tools.
 
@@ -66,10 +66,11 @@ Get a TypeSafe key at [docs.typesafe.ai](https://docs.typesafe.ai) for `jev-judg
 
 - **Multi-candidate `ctx7_library` gets disambiguation.** When Context7 returns several library IDs, one `choice` question asks which ID is most likely the intended library; the chosen option's meaning is rendered inline. Single-candidate and empty resolutions are skipped (deterministic cases).
 - **Silent degradation.** A missing key, `JEV_JUDGE=off`, API errors, timeouts (15s), or skip heuristics (error results, empty/too-short results, trivial `instant` searches) all pass the original result through untouched. An unavailable judge must never break the search.
+- **Account failures warn the user.** Persistent judge failures — 402 (insufficient balance), 401 or 403 (key problems) — surface a `ui.notify` warning that names the fix (top up at docs.typesafe.ai, check `TYPESAFE_API_KEY`), throttled to once per 10 minutes and skipped in modes without a UI. Transient failures (timeouts, 429/529, 5xx) stay fully silent. `/jev-judge` always shows the last failure, marked *since recovered* once a later judgment succeeds.
 - **Retries are bounded.** Network failures and 429/529 are retried twice with backoff honoring `retry-after`; other HTTP errors fail fast.
 - **Data, not conclusions.** The block carries probabilities, the chosen option's meaning, and the runner-up. The model still decides; the bundled skill teaches how to read it. Low-confidence verdicts are labeled as weak signals.
 - **What leaves your machine.** The tool's query parameters and a truncated excerpt of its result (≤ 6 000 chars) are sent to `api.typesafe.ai`. Keep secrets and proprietary code in mind before enabling the judge on sensitive searches.
-- **Status.** `/jev-judge` shows the watched tools, model, and the last judgment made this session.
+- **Status.** `/jev-judge` shows the watched tools, model, the last judgment made this session, and the last failure (with a recovery marker; an unresolved failure turns the notice into a warning).
 
 ## `ctx7_*` notes
 

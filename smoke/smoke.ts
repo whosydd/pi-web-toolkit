@@ -37,6 +37,12 @@ async function judge(toolName: string, input: any, result: any) {
 		console.log(`   [jev-judge] no judgment (${result?.isError ? "error result" : "skipped or inert"})`);
 		return;
 	}
+	if ("failure" in out) {
+		const status = out.status ? ` (HTTP ${out.status})` : "";
+		const remedy = out.kind === "actionable" && out.remedy ? ` — ${out.remedy}` : "";
+		console.log(`   [jev-judge] judgment failed: ${out.reason}${status}${remedy}`);
+		return;
+	}
 	console.log(`   [jev-judge] ${out.meta.latencyMs}ms via ${out.meta.model}`);
 	console.log(
 		out.appendedText

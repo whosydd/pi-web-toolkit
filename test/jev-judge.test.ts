@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import registerJevJudge, {
+	buildFailureWarning,
 	buildQuestions,
 	buildState,
+	classifyFailure,
 	extractLibraryCandidates,
 	extractText,
 	judgeToolResult,
 	judgeWanted,
+	lastStatus,
+	markFailureWarned,
 	renderJudgment,
+	shouldWarnAboutFailure,
+	TypeSafeError,
+	type JudgeFailure,
+	type JudgeOutcome,
 	type Question,
 } from "../extensions/jev-judge.ts";
 
@@ -70,6 +78,18 @@ const okFetch =
 		new Response(JSON.stringify(body), { status: 200 });
 
 const text = (t: string) => [{ type: "text", text: t }];
+
+/** Narrow an ambiguous judgeToolResult result to a successful outcome. */
+function expectOutcome(result: unknown): JudgeOutcome {
+	assert.ok(result && typeof result === "object" && !("failure" in result), "expected a judgment, got a failure");
+	return result as JudgeOutcome;
+}
+
+/** Narrow an ambiguous judgeToolResult result to a classified failure. */
+function expectFailure(result: unknown): JudgeFailure {
+	assert.ok(result && typeof result === "object" && "failure" in result, "expected a failure, got a judgment");
+	return result as JudgeFailure;
+}
 
 // ---------------------------------------------------------------------------
 // pure helpers
@@ -249,10 +269,11 @@ describe("judgeToolResult", () => {
 				return new Response(JSON.stringify(jevResponse), { status: 200 });
 			}) as typeof fetch,
 		});
-		assert.ok(outcome);
-		assert.ok(outcome.appendedText.includes("jev-judge (model jev-1.13.0"));
-		assert.ok(outcome.appendedText.includes("sufficiency: 0.89"));
-		assert.equal(outcome.meta.model, "jev-1.13.0");
+		assert.ok(outcome, "expected a judgment for a good result");
+		const ok = expectOutcome(outcome);
+		assert.ok(ok.appendedText.includes("jev-judge (model jev-1.13.0"));
+		assert.ok(ok.appendedText.includes("sufficiency: 0.89"));
+		assert.equal(ok.meta.model, "jev-1.13.0");
 		assert.equal(requested.url, "https://api.typesafe.ai/v1/systemone");
 		const body = JSON.parse(requested.init.body);
 		assert.equal(body.model, "jev-latest");
@@ -277,17 +298,20 @@ describe("judgeToolResult", () => {
 		assert.equal(outcome, undefined);
 	});
 
-	it("degrades silently when the API fails", async () => {
+	it("returns a transient failure when the API fails (result still passes through)", async () => {
 		const outcome = await judgeToolResult("exa_search", exaInput, text(exaResultText), {
 			apiKey: "sk-test",
-			fetchImpl: (async () => new Response("rate limited", { status: 500 })) as typeof fetch,
+			fetchImpl: (async () => new Response("boom", { status: 500 })) as typeof fetch,
 		});
-		assert.equal(outcome, undefined);
+		const failure = expectFailure(outcome);
+		assert.equal(failure.kind, "transient");
+		assert.equal(failure.status, 500);
+		assert.ok(!("appendedText" in failure), "failures must not carry a judgment block");
 	});
 
-	it("passes non-retryable HTTP errors through without retrying", async () => {
+	it("classifies 401 as actionable without retrying", async () => {
 		let calls = 0;
-		await judgeToolResult("exa_search", exaInput, text(exaResultText), {
+		const outcome = await judgeToolResult("exa_search", exaInput, text(exaResultText), {
 			apiKey: "sk-test",
 			fetchImpl: (async () => {
 				calls++;
@@ -295,6 +319,57 @@ describe("judgeToolResult", () => {
 			}) as typeof fetch,
 		});
 		assert.equal(calls, 1);
+		const failure = expectFailure(outcome);
+		assert.equal(failure.kind, "actionable");
+		assert.equal(failure.status, 401);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// failure classification + user warnings
+// ---------------------------------------------------------------------------
+
+describe("classifyFailure", () => {
+	it("maps 402 to actionable with a balance remedy", () => {
+		const f = classifyFailure(new TypeSafeError("TypeSafe API error 402: insufficient credits", 402));
+		assert.equal(f.failure, true);
+		assert.equal(f.kind, "actionable");
+		assert.equal(f.status, 402);
+		assert.match(f.reason, /balance/i);
+		assert.match(f.remedy!, /top up/i);
+		assert.equal(f.detail, "TypeSafe API error 402: insufficient credits");
+	});
+
+	it("maps 401 and 403 to actionable key remedies", () => {
+		assert.match(classifyFailure(new TypeSafeError("x", 401)).reason, /key/i);
+		assert.match(classifyFailure(new TypeSafeError("x", 403)).reason, /access/i);
+	});
+
+	it("treats network errors and 5xx as transient", () => {
+		assert.equal(classifyFailure(new Error("fetch failed")).kind, "transient");
+		assert.equal(classifyFailure(new TypeSafeError("API error 500", 500)).kind, "transient");
+		assert.equal(classifyFailure("weird").kind, "transient");
+	});
+
+	it("renders a single-line warning naming the fix", () => {
+		const w = buildFailureWarning(
+			classifyFailure(new TypeSafeError("TypeSafe API error 402: insufficient credits", 402)),
+		);
+		assert.match(w, /^jev-judge: TypeSafe judging failed/);
+		assert.match(w, /HTTP 402/);
+		assert.match(w, /top up/i);
+		assert.match(w, /uncalibrated/);
+	});
+
+	it("throttles warnings to once per interval", () => {
+		const now = Date.now();
+		markFailureWarned(now - 9 * 60_000);
+		assert.equal(shouldWarnAboutFailure(now), false);
+		markFailureWarned(now - 10 * 60_000);
+		assert.equal(shouldWarnAboutFailure(now), true);
+		// a fresh warning suppresses further ones immediately
+		markFailureWarned(now);
+		assert.equal(shouldWarnAboutFailure(now + 1), false);
 	});
 });
 
@@ -304,17 +379,29 @@ describe("judgeToolResult", () => {
 
 type ToolResultHandler = (event: any, ctx: any) => Promise<any>;
 
-function loadHook(): ToolResultHandler {
-	let handler: ToolResultHandler | undefined;
+function loadExtension(): { hook: ToolResultHandler; commands: Map<string, any> } {
+	let hook: ToolResultHandler | undefined;
+	const commands = new Map<string, any>();
 	const pi = {
 		on: (event: string, fn: any) => {
-			if (event === "tool_result") handler = fn;
+			if (event === "tool_result") hook = fn;
 		},
-		registerCommand: () => {},
+		registerCommand: (name: string, def: any) => commands.set(name, def),
 	};
 	registerJevJudge(pi as any);
-	assert.ok(handler, "extension must register a tool_result hook");
-	return handler!;
+	assert.ok(hook, "extension must register a tool_result hook");
+	assert.ok(commands.has("jev-judge"), "extension must register the /jev-judge command");
+	return { hook: hook!, commands };
+}
+
+function loadHook(): ToolResultHandler {
+	return loadExtension().hook;
+}
+
+function clearStatus(): void {
+	for (const key of Object.keys(lastStatus)) {
+		delete (lastStatus as Record<string, unknown>)[key];
+	}
 }
 
 function stubGlobalFetch(body: unknown): void {
@@ -326,6 +413,8 @@ describe("extension hook", () => {
 	afterEach(() => {
 		delete process.env.TYPESAFE_API_KEY;
 		delete process.env.JEV_JUDGE;
+		clearStatus();
+		markFailureWarned(0);
 	});
 
 	it("patches content and merges details when a judgment is made", async () => {
@@ -342,7 +431,7 @@ describe("extension hook", () => {
 					details: { requestId: "req-1", costDollars: 0.01 },
 					isError: false,
 				},
-				{},
+				{ hasUI: true, ui: { notify: () => {} } },
 			);
 			assert.ok(patch);
 			const texts = patch.content.filter((b: any) => b.type === "text");
@@ -365,7 +454,7 @@ describe("extension hook", () => {
 				details: undefined,
 				isError: false,
 			},
-			{},
+			{ hasUI: true, ui: { notify: () => {} } },
 		);
 		assert.equal(patch, undefined);
 	});
@@ -376,8 +465,108 @@ describe("extension hook", () => {
 		const hook = loadHook();
 		const patch = await hook(
 			{ toolName: "exa_search", input: exaInput, content: text(exaResultText), details: undefined, isError: false },
-			{},
+			{ hasUI: true, ui: { notify: () => {} } },
 		);
 		assert.equal(patch, undefined);
+	});
+});
+
+describe("failure warnings", () => {
+	afterEach(() => {
+		delete process.env.TYPESAFE_API_KEY;
+		clearStatus();
+		markFailureWarned(0);
+	});
+
+	function failingFetch(status: number): void {
+		globalThis.fetch = (async () => new Response("nope", { status })) as typeof fetch;
+	}
+
+	const event = {
+		toolName: "exa_search",
+		input: exaInput,
+		content: text(exaResultText),
+		details: undefined,
+		isError: false,
+	};
+
+	it("warns once per interval for actionable failures and never for transient ones", async () => {
+		process.env.TYPESAFE_API_KEY = "sk-test";
+		const realFetch = globalThis.fetch;
+		const notifications: Array<[string, string]> = [];
+		const ctx = { hasUI: true, ui: { notify: (m: string, l: string) => notifications.push([m, l]) } };
+		try {
+			const hook = loadHook();
+
+			failingFetch(402);
+			assert.equal(await hook(event, ctx), undefined, "degraded results must pass through");
+			assert.equal(notifications.length, 1);
+			assert.equal(notifications[0][1], "warning");
+			assert.match(notifications[0][0], /402/);
+			assert.match(notifications[0][0], /top up/i);
+			assert.equal(lastStatus.lastErrorRecovered, false);
+
+			// throttled: an immediate second failure stays silent
+			assert.equal(await hook(event, ctx), undefined);
+			assert.equal(notifications.length, 1);
+
+			// transient failures never warn
+			failingFetch(500);
+			assert.equal(await hook(event, ctx), undefined);
+			assert.equal(notifications.length, 1);
+
+			// once the interval has elapsed it warns again
+			markFailureWarned(Date.now() - 11 * 60_000);
+			failingFetch(402);
+			assert.equal(await hook(event, ctx), undefined);
+			assert.equal(notifications.length, 2);
+		} finally {
+			globalThis.fetch = realFetch;
+		}
+	});
+
+	it("records failures without a UI and marks recovery on the next success", async () => {
+		process.env.TYPESAFE_API_KEY = "sk-test";
+		const realFetch = globalThis.fetch;
+		try {
+			const hook = loadHook();
+			const ctx = { hasUI: false, ui: { notify: () => {} } };
+
+			failingFetch(402);
+			await hook(event, ctx);
+			assert.match(lastStatus.lastError!, /balance/);
+			assert.match(lastStatus.lastError!, /402/);
+			assert.ok(lastStatus.lastErrorAt);
+			assert.equal(lastStatus.lastErrorRecovered, false);
+
+			stubGlobalFetch(jevResponse);
+			await hook(event, ctx);
+			assert.equal(lastStatus.lastErrorRecovered, true);
+			assert.equal(lastStatus.tool, "exa_search");
+		} finally {
+			globalThis.fetch = realFetch;
+		}
+	});
+
+	it("surfaces an unresolved failure in /jev-judge status as a warning", async () => {
+		process.env.TYPESAFE_API_KEY = "sk-test";
+		const { commands } = loadExtension();
+		const handler = commands.get("jev-judge").handler;
+		const notifications: Array<[string, string]> = [];
+		const ctx = { ui: { notify: (m: string, l: string) => notifications.push([m, l]) } };
+
+		lastStatus.lastError = "TypeSafe reports payment required (HTTP 402)";
+		lastStatus.lastErrorAt = "2025-01-01T00:00:00.000Z";
+		lastStatus.lastErrorRecovered = false;
+		await handler("", ctx);
+		assert.equal(notifications[0][1], "warning");
+		assert.match(notifications[0][0], /last failure/);
+		assert.match(notifications[0][0], /402/);
+
+		lastStatus.lastErrorRecovered = true;
+		notifications.length = 0;
+		await handler("", ctx);
+		assert.equal(notifications[0][1], "info");
+		assert.match(notifications[0][0], /since recovered/);
 	});
 });

@@ -9,7 +9,9 @@
 // Design constraints:
 // - Never blocks or breaks the underlying tool: a missing TYPESAFE_API_KEY,
 //   API errors, timeouts and deterministic skip heuristics all pass the
-//   original result through untouched (silent degradation).
+//   original result through untouched (silent degradation). Persistent
+//   failures (401/402/403: bad key, exhausted balance) additionally surface
+//   as a throttled user warning so calibration does not die silently.
 // - Judgments are data, not conclusions: probabilities plus the meaning of
 //   the chosen option are appended; the model still decides.
 // - No dependency on the user-level typesafe extension: this file talks to
@@ -306,7 +308,7 @@ export async function typesafeEvaluate(
 		}
 		if (res.ok) {
 			const data: any = await res.json();
-			if (!data?.answers) throw new Error("unexpected TypeSafe response shape");
+			if (!data?.answers) throw new TypeSafeError("unexpected TypeSafe response shape");
 			return data;
 		}
 		if ((res.status === 429 || res.status === 529) && attempt < MAX_RETRIES) {
@@ -316,8 +318,86 @@ export async function typesafeEvaluate(
 			continue;
 		}
 		const body = await res.text().catch(() => "");
-		throw new Error(`TypeSafe API error ${res.status}: ${body.slice(0, 200)}`);
+		throw new TypeSafeError(`TypeSafe API error ${res.status}: ${body.slice(0, 200)}`, res.status);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Failure classification + throttled user warnings
+// ---------------------------------------------------------------------------
+
+export class TypeSafeError extends Error {
+	readonly status?: number;
+
+	constructor(message: string, status?: number) {
+		super(message);
+		this.name = "TypeSafeError";
+		this.status = status;
+	}
+}
+
+export interface JudgeFailure {
+	/** Discriminant distinguishing failures from JudgeOutcome values. */
+	failure: true;
+	/** actionable = the user can fix it (key/balance); transient = may self-heal */
+	kind: "actionable" | "transient";
+	status?: number;
+	/** Human-readable cause, e.g. "TypeSafe reports payment required" */
+	reason: string;
+	/** What the user can do about it (actionable failures only) */
+	remedy?: string;
+	/** Raw error message, including the response body excerpt when present */
+	detail: string;
+}
+
+/** Classify a TypeSafe request error: 401/402/403 need the user; the rest may self-heal. */
+export function classifyFailure(err: unknown): JudgeFailure {
+	const status = err instanceof TypeSafeError ? err.status : undefined;
+	const detail = err instanceof Error ? err.message : String(err);
+	const common = { failure: true as const, status, detail };
+	if (status === 402) {
+		return {
+			...common,
+			kind: "actionable",
+			reason: "TypeSafe reports payment required — the account balance is likely exhausted",
+			remedy: "top up your TypeSafe balance (docs.typesafe.ai)",
+		};
+	}
+	if (status === 401) {
+		return {
+			...common,
+			kind: "actionable",
+			reason: "TypeSafe rejected the API key",
+			remedy: "check TYPESAFE_API_KEY",
+		};
+	}
+	if (status === 403) {
+		return {
+			...common,
+			kind: "actionable",
+			reason: "TypeSafe denied access to this endpoint or model",
+			remedy: "check your TypeSafe plan and key permissions",
+		};
+	}
+	return { ...common, kind: "transient", reason: detail || "unknown TypeSafe request failure" };
+}
+
+export function buildFailureWarning(f: JudgeFailure): string {
+	const status = f.status ? ` (HTTP ${f.status})` : "";
+	const remedy = f.remedy ? ` ${f.remedy};` : "";
+	return `jev-judge: TypeSafe judging failed — ${f.reason}${status}.${remedy} until then search results pass through uncalibrated.`;
+}
+
+const FAILURE_WARN_INTERVAL_MS = 10 * 60_000;
+let lastFailureWarnAt = 0;
+
+/** True when enough time has passed since the last actionable-failure warning. */
+export function shouldWarnAboutFailure(now: number = Date.now()): boolean {
+	return now - lastFailureWarnAt >= FAILURE_WARN_INTERVAL_MS;
+}
+
+export function markFailureWarned(now: number = Date.now()): void {
+	lastFailureWarnAt = now;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +482,7 @@ export async function judgeToolResult(
 		enabledTools?: string[];
 		model?: string;
 	} = {},
-): Promise<JudgeOutcome | undefined> {
+): Promise<JudgeOutcome | JudgeFailure | undefined> {
 	// An explicitly-passed apiKey (even null) wins over the environment so
 	// callers and tests can force-disable the judge.
 	const apiKey =
@@ -438,9 +518,11 @@ export async function judgeToolResult(
 				latencyMs: Date.now() - started,
 			},
 		};
-	} catch {
+	} catch (err) {
 		// Silent degradation: an unavailable judge must never break the search.
-		return undefined;
+		// The classified failure is still surfaced so the extension can warn the
+		// user about actionable problems (empty balance, bad key).
+		return classifyFailure(err);
 	}
 }
 
@@ -448,29 +530,50 @@ export async function judgeToolResult(
 // Extension wiring
 // ---------------------------------------------------------------------------
 
-const lastStatus: { tool?: string; latencyMs?: number; error?: string; at?: string } = {};
+export const lastStatus: {
+	tool?: string;
+	latencyMs?: number;
+	at?: string;
+	lastError?: string;
+	lastErrorAt?: string;
+	lastErrorRecovered?: boolean;
+} = {};
 
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", async (event, ctx) => {
 		const apiKey = process.env.TYPESAFE_API_KEY ?? null;
 		if (!apiKey || process.env.JEV_JUDGE === "off") return undefined;
-		const outcome = await judgeToolResult(
+		const result = await judgeToolResult(
 			event.toolName,
 			event.input as Record<string, unknown> | undefined,
 			event.content,
 			{ isError: event.isError, signal: ctx.signal, apiKey },
 		);
-		if (!outcome) return undefined;
+		if (!result) return undefined;
+		if ("failure" in result) {
+			// Degraded: the original result passes through untouched, but keep
+			// the user informed instead of letting calibration die silently.
+			lastStatus.lastError = `${result.reason}${result.status ? ` (HTTP ${result.status})` : ""}`;
+			lastStatus.lastErrorAt = new Date().toISOString();
+			lastStatus.lastErrorRecovered = false;
+			if (result.kind === "actionable" && shouldWarnAboutFailure() && ctx.hasUI) {
+				markFailureWarned();
+				ctx.ui.notify(buildFailureWarning(result), "warning");
+			}
+			return undefined;
+		}
+		if (lastStatus.lastError && lastStatus.lastErrorRecovered === false) {
+			lastStatus.lastErrorRecovered = true;
+		}
 		lastStatus.tool = event.toolName;
-		lastStatus.latencyMs = outcome.meta.latencyMs;
-		lastStatus.error = undefined;
+		lastStatus.latencyMs = result.meta.latencyMs;
 		lastStatus.at = new Date().toISOString();
 		return {
 			content: [
 				...event.content,
-				{ type: "text" as const, text: `---\n${outcome.appendedText}` },
+				{ type: "text" as const, text: `---\n${result.appendedText}` },
 			],
-			details: { ...((event.details as Record<string, unknown>) ?? {}), jevJudge: outcome.meta },
+			details: { ...((event.details as Record<string, unknown>) ?? {}), jevJudge: result.meta },
 		};
 	});
 
@@ -492,9 +595,14 @@ export default function (pi: ExtensionAPI) {
 			const last = lastStatus.tool
 				? `last judgment: ${lastStatus.tool} in ${lastStatus.latencyMs}ms (${lastStatus.at})`
 				: "no judgments made yet this session";
+			const failing =
+				lastStatus.lastError !== undefined && lastStatus.lastErrorRecovered === false;
+			const failure = lastStatus.lastError
+				? `; last failure: ${lastStatus.lastError} at ${lastStatus.lastErrorAt}${lastStatus.lastErrorRecovered ? " (since recovered)" : ""}`
+				: "";
 			ctx.ui.notify(
-				`jev-judge: active — tools: ${enabledTools().join(", ")}, model: ${process.env.JEV_JUDGE_MODEL ?? DEFAULT_MODEL}; ${last}`,
-				"info",
+				`jev-judge: active — tools: ${enabledTools().join(", ")}, model: ${process.env.JEV_JUDGE_MODEL ?? DEFAULT_MODEL}; ${last}${failure}`,
+				failing ? "warning" : "info",
 			);
 		},
 	});
