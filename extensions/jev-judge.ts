@@ -173,14 +173,23 @@ const SUFFICIENCY_NOUL: Question = {
 		"One yes/no probability: do the results in the state contain information that directly answers the query, as opposed to merely being topically adjacent?",
 };
 
+const CORROBORATION_NOUL: Question = {
+	type: "noul",
+	instructions:
+		"One yes/no probability: are the load-bearing facts of the answer corroborated — stated consistently across results from independent sources, or traceable to an authoritative source among the results (official docs, release notes, specs) — as opposed to resting on a single non-authoritative page or a thin excerpt?",
+};
+
 const EXA_NEXT_ACTION: Question = {
 	type: "choice",
 	instructions:
 		"Pick the single best next action for an information-seeking task given this state.",
 	criteria: {
-		done: "The results already contain the answer; answer without further retrieval.",
+		done:
+			"The results contain the answer corroborated by at least two independent sources, or by one authoritative source (official docs, release notes, specs); answer without further retrieval.",
 		show_more:
-			"A specific result clearly holds the full answer but the excerpt is too thin; fetch that page (exa_fetch) before answering.",
+			"A specific result clearly holds the full answer but the excerpt is too thin to quote precisely; fetch that page (exa_fetch) before answering.",
+		cross_check:
+			"Load-bearing facts rest on a single result, results disagree, or no authoritative source is among them; verify via a second independent search or fetch the official domain before answering.",
 		refine:
 			"The query itself missed the target; re-search with different keywords or filters.",
 		browse_more:
@@ -193,7 +202,8 @@ const CODE_NEXT_ACTION: Question = {
 	instructions:
 		"Pick the single best next action for an information-seeking task given this state.",
 	criteria: {
-		done: "The matches show the usage pattern clearly enough to answer.",
+		done:
+			"The usage pattern is shown clearly enough to answer, ideally in more than one unrelated repository.",
 		refine_query:
 			"The query missed; rewrite it (better pattern, patternType:regexp, different keywords).",
 		broaden:
@@ -228,24 +238,25 @@ export function buildQuestions(
 		const criteria: Record<string, string> = {};
 		for (const c of candidates) criteria[c.id] = `Library "${c.title}"`;
 		criteria.none_of_these =
-			"No listed candidate matches; fall back to exa_search instead of forcing an ID.";
+			"The named library is not itself among the candidates (a related library from the same family or org is not the same library); fall back to exa_search instead of forcing an adjacent ID.";
 		return {
 			best_match: {
 				type: "choice",
 				instructions:
-					"The user resolved a library name and Context7 returned several candidate library IDs. Pick the one that is most likely the library the query means.",
+					"The user resolved a library name and Context7 returned several candidate library IDs. Pick the candidate that IS the library the query names — not a related, sibling, or adjacent library. If the named library itself is not among the candidates (even when a related one is), pick none_of_these.",
 				criteria,
 			},
 		};
 	}
 	if (toolName === "code_search") {
-		return { sufficiency: SUFFICIENCY_NOUL, next_action: CODE_NEXT_ACTION };
+		return { sufficiency: SUFFICIENCY_NOUL, corroboration: CORROBORATION_NOUL, next_action: CODE_NEXT_ACTION };
 	}
 	if (toolName === "ctx7_docs") {
+		// the docs are authoritative by definition — corroboration adds nothing
 		return { sufficiency: SUFFICIENCY_NOUL, next_action: DOCS_NEXT_ACTION };
 	}
 	if (toolName === "exa_search") {
-		return { sufficiency: SUFFICIENCY_NOUL, next_action: EXA_NEXT_ACTION };
+		return { sufficiency: SUFFICIENCY_NOUL, corroboration: CORROBORATION_NOUL, next_action: EXA_NEXT_ACTION };
 	}
 	return null;
 }
@@ -406,8 +417,10 @@ export function markFailureWarned(now: number = Date.now()): void {
 
 function confidenceVerdict(p: number): string {
 	if (p >= 0.75) return "likely yes";
-	if (p <= 0.35) return "likely no";
-	return "uncertain (near 0.5: genuinely undecided)";
+	if (p > 0.6) return "leaning yes (weak)";
+	if (p >= 0.4) return "uncertain (near 0.5: genuinely undecided)";
+	if (p > 0.35) return "leaning no (weak)";
+	return "likely no";
 }
 
 function optionDescription(
@@ -456,8 +469,20 @@ export function renderJudgment(
 		}
 	}
 	lines.push(
-		"(calibrated probabilities from Jev; treat <0.6 or low confidence as a weak signal, not a verdict)",
+		"(calibrated probabilities from Jev; treat anything below 0.75 or with low confidence as a weak signal, not a verdict)",
 	);
+	// correctness guard: a done verdict without corroboration is how confident
+	// wrong answers happen — say so instead of letting the model read it as a
+	// green light
+	const corroboration = answers.corroboration;
+	const choseDone = Object.values(answers).some(
+		(a: any) => a?.type === "choice" && a.choice === "done",
+	);
+	if (choseDone && corroboration?.type === "noul" && typeof corroboration.noul === "number" && corroboration.noul < 0.6) {
+		lines.push(
+			`⚠ done with weak corroboration (${corroboration.noul.toFixed(2)}) — cross-check against a second independent or an official source before citing specifics`,
+		);
+	}
 	return lines.join("\n");
 }
 

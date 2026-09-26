@@ -181,10 +181,12 @@ describe("extractLibraryCandidates", () => {
 });
 
 describe("buildQuestions", () => {
-	it("exa_search gets sufficiency + web-shaped next action", () => {
+	it("exa_search gets sufficiency + corroboration + web-shaped next action", () => {
 		const q = buildQuestions("exa_search", exaResultText)!;
 		assert.equal(q.sufficiency.type, "noul");
+		assert.equal(q.corroboration.type, "noul");
 		assert.ok("show_more" in (q.next_action.criteria as object));
+		assert.ok("cross_check" in (q.next_action.criteria as object));
 	});
 
 	it("code_search gets code-shaped options", () => {
@@ -203,6 +205,10 @@ describe("buildQuestions", () => {
 		assert.ok(criteria["/vercel/next.js"].includes("Next.js"));
 		assert.ok(criteria["/community/nextjs"].includes("Community"));
 		assert.ok("none_of_these" in criteria);
+		// the named library must itself be a candidate; adjacent libraries do not count
+		assert.match(q.best_match.instructions, /IS the library the query names/);
+		assert.match(q.best_match.instructions, /pick none_of_these/);
+		assert.match(criteria.none_of_these, /adjacent/);
 	});
 
 	it("returns null for unknown tools", () => {
@@ -242,6 +248,18 @@ describe("renderJudgment", () => {
 		assert.ok(out.includes("genuinely undecided"));
 	});
 
+	it("labels the 0.61–0.74 and 0.36–0.39 bands as weak leanings, not undecided", () => {
+		const leaningYes = renderJudgment("m", undefined, { sufficiency: { type: "noul", noul: 0.74 } }, questions);
+		assert.ok(leaningYes.includes("sufficiency: 0.74 — leaning yes (weak)"));
+		assert.ok(!leaningYes.includes("genuinely undecided"));
+		const leaningNo = renderJudgment("m", undefined, { sufficiency: { type: "noul", noul: 0.38 } }, questions);
+		assert.ok(leaningNo.includes("sufficiency: 0.38 — leaning no (weak)"));
+		const edgeUncertain = renderJudgment("m", undefined, { sufficiency: { type: "noul", noul: 0.6 } }, questions);
+		assert.ok(edgeUncertain.includes("genuinely undecided"));
+		const edgeLikelyNo = renderJudgment("m", undefined, { sufficiency: { type: "noul", noul: 0.35 } }, questions);
+		assert.ok(edgeLikelyNo.includes("sufficiency: 0.35 — likely no"));
+	});
+
 	it("renders the chosen option with its criteria description and runner-up", () => {
 		const out = renderJudgment("jev-1.13.0", { input_tokens: 533 }, jevResponse.answers, questions);
 		assert.ok(out.includes("next_action: show_more (p=0.87, conf=0.81)"));
@@ -252,6 +270,28 @@ describe("renderJudgment", () => {
 	it("surfaces unknown answer shapes verbatim", () => {
 		const out = renderJudgment("m", undefined, { weird: { foo: 1 } }, questions);
 		assert.ok(out.includes('weird: {"foo":1}'));
+	});
+
+	it("warns when the action is done but corroboration is weak", () => {
+		const out = renderJudgment("m", undefined, {
+			sufficiency: { type: "noul", noul: 0.9 },
+			corroboration: { type: "noul", noul: 0.4 },
+			next_action: { type: "choice", choice: "done", confidence: 0.8, probabilities: { done: 0.9 } },
+		}, questions);
+		assert.match(out, /⚠ done with weak corroboration \(0\.40\)/);
+	});
+
+	it("does not warn when corroboration is strong or the action is not done", () => {
+		const strong = renderJudgment("m", undefined, {
+			corroboration: { type: "noul", noul: 0.85 },
+			next_action: { type: "choice", choice: "done", confidence: 0.8, probabilities: { done: 0.9 } },
+		}, questions);
+		assert.ok(!strong.includes("⚠"));
+		const notDone = renderJudgment("m", undefined, {
+			corroboration: { type: "noul", noul: 0.4 },
+			next_action: { type: "choice", choice: "refine", confidence: 0.8, probabilities: { refine: 0.9 } },
+		}, questions);
+		assert.ok(!notDone.includes("⚠"));
 	});
 });
 

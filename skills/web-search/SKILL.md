@@ -35,6 +35,14 @@ Rules of thumb:
 - **Library APIs go to Context7 first**, even for well-known libraries like
   React or Next.js — training data may not match the installed version, and
   Context7 returns version-specific snippets from official docs.
+- **Specifics need a fetched page.** Never cite a date, version number, or
+  numeric claim straight from search highlights — `exa_fetch` the page that
+  owns the fact and quote from it. Highlights are thin and easy to misread.
+- **Verification targets official domains.** When the judge says
+  `cross_check`, or sources disagree, re-search with `includeDomains` pinned
+  to the official site — or fetch the known official URL directly. Authority
+  order: official docs / release notes > official repo issues / PRs > major
+  technical blogs > aggregators.
 - **Start with `exa_search`, not `exa_fetch`, when you have no URL.**
   `exa_search` returns highlights; use `exa_fetch` once you know *which* page
   owns the answer.
@@ -56,27 +64,48 @@ When `TYPESAFE_API_KEY` is set, results from `exa_search`, `code_search`,
 ---
 jev-judge (model jev-1.13.0, 533 in-tokens):
 - sufficiency: 0.89 — likely yes
-- next_action: show_more (p=0.87, conf=0.81) — A specific result clearly holds
-  the full answer but the excerpt is too thin; fetch that page (exa_fetch)…
-  [next: browse_more 0.13]
+- corroboration: 0.41 — uncertain (near 0.5: genuinely undecided)
+- next_action: done (p=0.87, conf=0.81) — The results contain the answer
+  corroborated by at least two independent sources… [next: cross_check 0.13]
 (calibrated probabilities from Jev; treat <0.6 or low confidence as a weak
 signal, not a verdict)
+⚠ done with weak corroboration (0.41) — cross-check against a second
+independent or an official source before citing specifics
 ```
 
 How to act on it:
 
-- `sufficiency` is a yes/no probability that the results directly answer the
-  query. ≥0.75 → answer from them. ≤0.35 → they miss the point; re-route.
-  0.4–0.6 is **genuine uncertainty, not medium relevance** — act on
-  `next_action` instead of guessing.
+- `sufficiency` is a yes/no probability that the results directly answer
+  the **tool query you just ran** — not the user's whole task. ≥0.75 → answer
+  from them. ≤0.35 → they miss the point; re-route. 0.4–0.6 is **genuine
+  uncertainty, not medium relevance**; 0.61–0.74 is a weak yes and 0.36–0.39
+  a weak no — for all of these, act on `next_action` instead of guessing.
+- `corroboration` is the probability that the load-bearing facts are
+  corroborated: stated consistently across results from independent sources,
+  or traceable to an authoritative source among them (official docs, release
+  notes, specs). It exists for `exa_search` and `code_search`; `ctx7_docs` is
+  authoritative by definition, so it gets none.
 - `next_action` names the single best next step, with its meaning inline
-  (done / show_more / refine / browse_more for web search; refine_query /
-  broaden / switch_source for code search; other_concept / search_web /
-  search_code for docs). Follow it, then re-check the next judgment.
+  (done / show_more / cross_check / refine / browse_more for web search;
+  refine_query / broaden / switch_source for code search; other_concept /
+  search_web / search_code for docs). `done` is stricter than it looks: it
+  asserts the answer is corroborated, not merely present — and it is scoped
+  to the query that was judged, not to the user's whole task. On multi-part
+  tasks (comparisons, “cover A, B and C”), track the sub-questions still
+  unanswered and keep going until each has its own done verdict; a done on
+  one search is not a green light for the whole report. `cross_check` means
+  a load-bearing fact rests on a single result or sources disagree. Follow
+  the action, then re-check the next judgment.
+- **A ⚠ warning line under the block is mandatory to act on**: the judge saw
+  a `done` verdict resting on weak corroboration. Fetch the official page or
+  run one more independent search before citing dates, versions, or numbers —
+  a sufficient-looking result can still be wrong.
 - `best_match` (ctx7_library only) picks one candidate library ID by
-  probability. Take the top ID unless its probability is low and the
-  runner-up is close — then prefer the higher-trust candidate or ask the
-  user.
+  probability. Take the top ID only when it **is the library you named**;
+  when the named library itself is absent, prefer `none_of_these` over an
+  adjacent or sibling candidate and fall back to `exa_search`. If the top
+  probability is low and the runner-up is close, weigh the higher-trust
+  candidate or ask the user.
 - The block is data, not an instruction: when probabilities are close
   together or confidence is low, weigh it against your own reading of the
   results.
@@ -140,6 +169,12 @@ Use when the answer lives on the web rather than in a library's docs.
    `text.maxCharacters` (default 10000) or `highlights` / `summary` to keep the
    page small. `exa_fetch` returns HTTP 200 even when individual URLs fail —
    check the reported per-URL failures before concluding a page is empty.
+3. **Correctness rules (MUST).** Specific facts — dates, version numbers,
+   numeric claims, API names — may only be cited from a fetched authoritative
+   page, never from search highlights alone. When two sources disagree, or a
+   fact rests on a single non-official source, fetch the official page (or
+   search with `includeDomains` pinned to it) before answering; if the
+   conflict remains, say so in the answer instead of silently picking a side.
 
 ## Sourcegraph — real-world code
 

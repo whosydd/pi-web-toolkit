@@ -5,7 +5,7 @@ A [pi](https://pi.dev) package with four independent extensions (toggle each one
 - **Context7** — `ctx7_library` / `ctx7_docs`: up-to-date, version-aware library and framework documentation from [Context7](https://context7.com)
 - **Exa** — `exa_search` / `exa_fetch`: high-quality web search with category/date/domain filters, selectable content extraction (highlights/text/summary/links/code blocks), freshness control, subpage crawling, and optional structured synthesis
 - **Sourcegraph** — `code_search`: search code across millions of public open-source repositories (free, no API key)
-- **jev-judge** — automatic TypeSafe (Jev) calibration appended to web-search tool results: every result arrives with probability-calibrated verdicts (is it sufficient? what's the best next step?) before the model sees it; persistent account failures (empty balance, bad key) raise throttled user warnings
+- **jev-judge** — automatic TypeSafe (Jev) calibration appended to web-search tool results: every result arrives with probability-calibrated verdicts (is it sufficient and corroborated? what's the best next step?) before the model sees it; persistent account failures (empty balance, bad key) raise throttled user warnings
 
 The bundled `web-search` skill teaches the agent which source to use for a given question and how to chain the tools.
 
@@ -60,17 +60,21 @@ Get a TypeSafe key at [docs.typesafe.ai](https://docs.typesafe.ai) for `jev-judg
   ---
   jev-judge (model jev-1.13.0, 533 in-tokens):
   - sufficiency: 0.89 — likely yes
-  - next_action: show_more (p=0.87, conf=0.81) — A specific result clearly holds the full answer… [next: browse_more 0.13]
-  (calibrated probabilities from Jev; treat <0.6 or low confidence as a weak signal, not a verdict)
+  - corroboration: 0.41 — uncertain (near 0.5: genuinely undecided)
+  - next_action: done (p=0.87, conf=0.81) — The results contain the answer corroborated by at least two… [next: cross_check 0.13]
+  (calibrated probabilities from Jev; treat anything below 0.75 or with low confidence as a weak signal, not a verdict)
+  ⚠ done with weak corroboration (0.41) — cross-check against a second independent or an official source before citing specifics
   ```
 
-- **Multi-candidate `ctx7_library` gets disambiguation.** When Context7 returns several library IDs, one `choice` question asks which ID is most likely the intended library; the chosen option's meaning is rendered inline. Single-candidate and empty resolutions are skipped (deterministic cases).
+- **Multi-candidate `ctx7_library` gets disambiguation.** When Context7 returns several library IDs, one `choice` question asks which ID is most likely the intended library; the chosen option's meaning is rendered inline. The named library must itself be a candidate — when it is absent, the `none_of_these` fallback is preferred over an adjacent or sibling ID. Single-candidate and empty resolutions are skipped (deterministic cases).
 - **Silent degradation.** A missing key, `JEV_JUDGE=off`, API errors, timeouts (15s), or skip heuristics (error results, empty/too-short results, trivial `instant` searches) all pass the original result through untouched. An unavailable judge must never break the search.
 - **Account failures warn the user.** Persistent judge failures — 402 (insufficient balance), 401 or 403 (key problems) — surface a `ui.notify` warning that names the fix (top up at docs.typesafe.ai, check `TYPESAFE_API_KEY`), throttled to once per 10 minutes and skipped in modes without a UI. Transient failures (timeouts, 429/529, 5xx) stay fully silent. `/jev-judge` always shows the last failure, marked *since recovered* once a later judgment succeeds.
 - **Retries are bounded.** Network failures and 429/529 are retried twice with backoff honoring `retry-after`; other HTTP errors fail fast.
+- **Correctness-first judging.** `done` means the answer is corroborated: at least two independent sources, or one authoritative source (official docs, release notes, specs). A `corroboration` question is judged alongside sufficiency (`exa_search`, `code_search`), a `cross_check` next action targets single-source or contradicting results, and a `done` with corroboration < 0.6 renders an explicit cross-check warning instead of a green light. Judgments are scoped to the tool query that produced the result: a `done` says that query is answered, not that a multi-part investigation is complete.
 - **Data, not conclusions.** The block carries probabilities, the chosen option's meaning, and the runner-up. The model still decides; the bundled skill teaches how to read it. Low-confidence verdicts are labeled as weak signals.
 - **What leaves your machine.** The tool's query parameters and a truncated excerpt of its result (≤ 6 000 chars) are sent to `api.typesafe.ai`. Keep secrets and proprietary code in mind before enabling the judge on sensitive searches.
 - **Status.** `/jev-judge` shows the watched tools, model, the last judgment made this session, and the last failure (with a recovery marker; an unresolved failure turns the notice into a warning).
+- **Correctness is measured, not assumed.** `smoke/fact-eval.ts` runs a fixed suite of fact questions (ground truth verified against official pages) through headless `pi -p` sessions per arm and grades answers deterministically by key-token presence — use it to A/B judge or skill changes (`node smoke/fact-eval.ts --arm ON --n 3`).
 
 ## `ctx7_*` notes
 
